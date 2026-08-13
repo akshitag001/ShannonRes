@@ -53,6 +53,10 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+        print("Enabled cudnn.benchmark for fixed-size inputs")
+    
     print("Loading LPIPS VGG model...")
     lpips_model = lpips.LPIPS(net='vgg').to(device)
 

@@ -27,6 +27,7 @@ def main():
     parser.add_argument("--input_dir", type=str, required=True, help="Directory containing input .npy files")
     parser.add_argument("--output_dir", type=str, required=True, help="Directory to save output .npy files")
     parser.add_argument("--checkpoints", type=str, nargs="+", default=[os.path.join("weights", "best_model.pth")], help="Paths to model checkpoints for ensembling")
+    parser.add_argument("--fast", action="store_true", help="Skip TTA for faster inference")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -55,9 +56,17 @@ def main():
         
         model.load_state_dict(checkpoint['model_state_dict'])
         model.eval()
+        
+        try:
+            model = torch.compile(model)
+            print(f"Successfully compiled model from {ckpt_path} with torch.compile()")
+        except Exception as e:
+            print(f"Warning: torch.compile() failed, falling back to uncompiled model. Error: {e}")
+            
         models.append(model)
         
     print(f"Successfully loaded {len(models)} model(s) for ensembling.")
+    print(f"Inference Mode: {'Fast (No TTA)' if args.fast else 'High Quality (8x TTA)'}")
 
     # DataLoader for batching
     dataset = InferenceDataset(args.input_dir)
@@ -84,10 +93,13 @@ def main():
         for batch_tensors, filenames in loader:
             batch_tensors = batch_tensors.to(device, non_blocking=True)
             
-            # Inference with 8x TTA across all ensembled models
+            # Inference with optional 8x TTA across all ensembled models
             ensemble_outputs = []
             for m in models:
-                ensemble_outputs.append(inference_with_tta(batch_tensors, m))
+                if args.fast:
+                    ensemble_outputs.append(m(batch_tensors))
+                else:
+                    ensemble_outputs.append(inference_with_tta(batch_tensors, m))
                 
             outputs = torch.mean(torch.stack(ensemble_outputs), dim=0)
             
