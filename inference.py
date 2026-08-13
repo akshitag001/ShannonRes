@@ -26,6 +26,7 @@ def main():
     parser = argparse.ArgumentParser(description="Inference for Image Restoration")
     parser.add_argument("--input_dir", type=str, required=True, help="Directory containing input .npy files")
     parser.add_argument("--output_dir", type=str, required=True, help="Directory to save output .npy files")
+    parser.add_argument("--checkpoints", type=str, nargs="+", default=[os.path.join("weights", "best_model.pth")], help="Paths to model checkpoints for ensembling")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -33,25 +34,30 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Running inference on {device}")
     
-    # Load model checkpoint
-    checkpoint_path = os.path.join("weights", "best_model.pth")
-    if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}. Please train the model first.")
+    # Load all models for ensembling
+    models = []
+    
+    for ckpt_path in args.checkpoints:
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(f"Checkpoint not found at {ckpt_path}. Please train the model first.")
+            
+        checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
+        config = checkpoint['config']
+        scale = checkpoint['scale']
         
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    config = checkpoint['config']
-    scale = checkpoint['scale']
-    
-    model = RestorationCNN(
-        in_channels=config['in_channels'],
-        out_channels=config['out_channels'],
-        num_features=config['num_features'],
-        num_res_blocks=config['num_res_blocks'],
-        scale=scale
-    ).to(device)
-    
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model.eval()
+        model = RestorationCNN(
+            in_channels=config['in_channels'],
+            out_channels=config['out_channels'],
+            num_features=config['num_features'],
+            num_res_blocks=config['num_res_blocks'],
+            scale=scale
+        ).to(device)
+        
+        model.load_state_dict(checkpoint['model_state_dict'])
+        model.eval()
+        models.append(model)
+        
+    print(f"Successfully loaded {len(models)} model(s) for ensembling.")
 
     # DataLoader for batching
     dataset = InferenceDataset(args.input_dir)
@@ -59,12 +65,31 @@ def main():
     batch_size = config.get('batch_size', 32)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
+    def inference_with_tta(x, model):
+        outputs = []
+        for k in range(4):
+            # Rotate
+            rot_x = torch.rot90(x, k, dims=[2, 3])
+            out_rot = model(rot_x)
+            outputs.append(torch.rot90(out_rot, -k, dims=[2, 3]))
+            
+            # Rotate + Flip
+            flip_x = torch.flip(rot_x, [3])
+            out_flip = model(flip_x)
+            outputs.append(torch.rot90(torch.flip(out_flip, [3]), -k, dims=[2, 3]))
+            
+        return torch.mean(torch.stack(outputs), dim=0)
+
     with torch.no_grad():
         for batch_tensors, filenames in loader:
-            batch_tensors = batch_tensors.to(device)
+            batch_tensors = batch_tensors.to(device, non_blocking=True)
             
-            # Inference
-            outputs = model(batch_tensors)
+            # Inference with 8x TTA across all ensembled models
+            ensemble_outputs = []
+            for m in models:
+                ensemble_outputs.append(inference_with_tta(batch_tensors, m))
+                
+            outputs = torch.mean(torch.stack(ensemble_outputs), dim=0)
             
             # Post-process and save
             outputs = outputs.cpu().numpy()

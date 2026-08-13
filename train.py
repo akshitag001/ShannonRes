@@ -11,6 +11,7 @@ import csv
 import time
 import lpips
 import torch.nn.functional as F
+from torch.cuda.amp import GradScaler, autocast
 
 from src.dataset import ImageRestorationDataset
 from src.model import RestorationCNN
@@ -31,6 +32,7 @@ def main():
     parser.add_argument("--smoke_test", action="store_true", help="Run a quick 2-epoch test on 32 samples")
     parser.add_argument("--baseline_only", action="store_true", help="Evaluate Bicubic baseline on validation set and exit")
     parser.add_argument("--num_epochs", type=int, default=None, help="Override number of epochs")
+    parser.add_argument("--run_name", type=str, default="", help="Suffix for saving logs and weights (e.g. 'seed2')")
     args = parser.parse_args()
 
     with open(args.config, 'r') as f:
@@ -97,8 +99,8 @@ def main():
         val_psnr, val_ssim, val_lpips = 0.0, 0.0, 0.0
         with torch.no_grad():
             for noisy, gt, filenames, is_synthetic in tqdm(val_loader, desc="Baseline"):
-                noisy = noisy.to(device)
-                gt = gt.to(device)
+                noisy = noisy.to(device, non_blocking=True)
+                gt = gt.to(device, non_blocking=True)
                 
                 # Baseline prediction
                 pred = F.interpolate(noisy, scale_factor=val_full_ds.scale, mode='bicubic', align_corners=False)
@@ -138,8 +140,9 @@ def main():
     os.makedirs(config['results_dir'], exist_ok=True)
     
     # Initialize train logs
-    metrics_log_file = os.path.join(config['save_dir'], 'train_log.csv')
-    audit_log_file = os.path.join(config['save_dir'], 'synthesis_audit.csv')
+    suffix = f"_{args.run_name}" if args.run_name else ""
+    metrics_log_file = os.path.join(config['save_dir'], f'train_log{suffix}.csv')
+    audit_log_file = os.path.join(config['save_dir'], f'synthesis_audit{suffix}.csv')
     
     with open(metrics_log_file, 'w', newline='') as f:
         writer = csv.writer(f)
@@ -151,6 +154,9 @@ def main():
 
     best_psnr = 0.0
 
+    # Initialize AMP Scaler
+    scaler = GradScaler()
+
     # Training Loop
     for epoch in range(config['num_epochs']):
         epoch_start_time = time.time()
@@ -160,15 +166,19 @@ def main():
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config['num_epochs']} [Train]")
         
         for noisy, gt, filenames, is_synthetic in pbar:
-            noisy = noisy.to(device)
-            gt = gt.to(device)
+            noisy = noisy.to(device, non_blocking=True)
+            gt = gt.to(device, non_blocking=True)
             
             optimizer.zero_grad()
-            pred = model(noisy)
-            loss, l1, ssim, lpips_val = criterion(pred, gt)
             
-            loss.backward()
-            optimizer.step()
+            amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+            with autocast(dtype=amp_dtype):
+                pred = model(noisy)
+                loss, l1, ssim, lpips_val = criterion(pred, gt)
+            
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             
             # Log sample source to audit log
             with open(audit_log_file, 'a', newline='') as f:
@@ -187,8 +197,8 @@ def main():
         with torch.no_grad():
             pbar_val = tqdm(val_loader, desc=f"Epoch {epoch+1}/{config['num_epochs']} [Val]")
             for noisy, gt, filenames, is_synthetic in pbar_val:
-                noisy = noisy.to(device)
-                gt = gt.to(device)
+                noisy = noisy.to(device, non_blocking=True)
+                gt = gt.to(device, non_blocking=True)
                 
                 pred = model(noisy)
                 psnr, ssim, lpips_val = evaluator.evaluate(pred, gt)
@@ -213,7 +223,8 @@ def main():
         # Save checkpoint
         if val_psnr > best_psnr:
             best_psnr = val_psnr
-            save_path = os.path.join(config['save_dir'], 'best_model.pth')
+            suffix = f"_{args.run_name}" if args.run_name else ""
+            save_path = os.path.join(config['save_dir'], f'best_model{suffix}.pth')
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
