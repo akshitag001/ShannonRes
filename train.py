@@ -33,6 +33,8 @@ def main():
     parser.add_argument("--baseline_only", action="store_true", help="Evaluate Bicubic baseline on validation set and exit")
     parser.add_argument("--num_epochs", type=int, default=None, help="Override number of epochs")
     parser.add_argument("--run_name", type=str, default="", help="Suffix for saving logs and weights (e.g. 'seed2')")
+    parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume training from")
+    parser.add_argument("--batch_size", type=int, default=None, help="Override batch size")
     args = parser.parse_args()
 
     with open(args.config, 'r') as f:
@@ -43,6 +45,9 @@ def main():
 
     if args.synthesize_prob is not None:
         config['synthesize_prob'] = args.synthesize_prob
+        
+    if args.batch_size is not None:
+        config['batch_size'] = args.batch_size
 
     if args.smoke_test:
         config['num_epochs'] = 2
@@ -139,6 +144,22 @@ def main():
         lambda_lpips=config['lambda_lpips'],
         device=device
     )
+    
+    start_epoch = 0
+    best_psnr = 0.0
+    
+    if args.resume:
+        if os.path.isfile(args.resume):
+            print(f"Loading checkpoint '{args.resume}'...")
+            checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
+            start_epoch = checkpoint['epoch'] + 1
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            best_psnr = checkpoint.get('val_psnr', 0.0)
+            print(f"Resuming training from epoch {start_epoch} with previous best PSNR: {best_psnr:.4f}")
+        else:
+            print(f"Error: No checkpoint found at '{args.resume}'")
+            return
 
     os.makedirs(config['save_dir'], exist_ok=True)
     os.makedirs(config['results_dir'], exist_ok=True)
@@ -148,21 +169,23 @@ def main():
     metrics_log_file = os.path.join(config['save_dir'], f'train_log{suffix}.csv')
     audit_log_file = os.path.join(config['save_dir'], f'synthesis_audit{suffix}.csv')
     
-    with open(metrics_log_file, 'w', newline='') as f:
+    mode = 'a' if args.resume else 'w'
+    
+    with open(metrics_log_file, mode, newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['epoch', 'train_loss', 'val_psnr', 'val_ssim', 'val_lpips', 'seconds'])
+        if not args.resume:
+            writer.writerow(['epoch', 'train_loss', 'val_psnr', 'val_ssim', 'val_lpips', 'seconds'])
         
-    with open(audit_log_file, 'w', newline='') as f:
+    with open(audit_log_file, mode, newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['epoch', 'filename', 'is_synthetic'])
-
-    best_psnr = 0.0
+        if not args.resume:
+            writer.writerow(['epoch', 'filename', 'is_synthetic'])
 
     # Initialize AMP Scaler
     scaler = GradScaler()
 
     # Training Loop
-    for epoch in range(config['num_epochs']):
+    for epoch in range(start_epoch, config['num_epochs']):
         epoch_start_time = time.time()
         
         model.train()
