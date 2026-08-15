@@ -123,9 +123,9 @@ if __name__ == "__main__":
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    benchmark_file = os.path.join("weights", "best_model.pth")
+    benchmark_file = os.path.join("weights", "best_model_seed2.pth")
     if os.path.exists(benchmark_file):
         generate_visuals(device, benchmark_file)
         run_benchmark(device, benchmark_file)
     else:
-        print(f"Waiting for best_model.pth to be saved to weights/ ... Run this script after training.")
+        print(f"Waiting for best_model_seed2.pth to be saved to weights/ ... Run this script after training.")
