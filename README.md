@@ -13,7 +13,6 @@ This repository contains our complete, high-performance solution for restoring n
 
 ## 🧠 Model Architecture & Pipeline
 ![Model Architecture](architecture.png)
-*(Please save the architecture image provided in the chat as `architecture.png` in the root folder!)*
 
 Our solution utilizes a highly optimized **Single-stage Super-Resolution Residual Network (SRResNet)**. 
 - **Why SRResNet?** We intentionally bypassed heavy Transformer architectures (like SwinIR) to ensure the model can run in real-time on edge devices. 
