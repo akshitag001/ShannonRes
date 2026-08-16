@@ -34,7 +34,6 @@ def main():
     parser.add_argument("--num_epochs", type=int, default=None, help="Override number of epochs")
     parser.add_argument("--run_name", type=str, default="", help="Suffix for saving logs and weights (e.g. 'seed2')")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume training from")
-    parser.add_argument("--finetune_uncertainty", action="store_true", help="Fine-tune the uncertainty branch")
     parser.add_argument("--batch_size", type=int, default=None, help="Override batch size")
     args = parser.parse_args()
 
@@ -50,18 +49,10 @@ def main():
     if args.batch_size is not None:
         config['batch_size'] = args.batch_size
 
-    if args.finetune_uncertainty:
-        args.run_name = "uncertainty"
-        if args.resume is None:
-            print("Warning: --finetune_uncertainty normally expects --resume to load the backbone weights.")
-
     if args.smoke_test:
         config['num_epochs'] = 2
         config['batch_size'] = 4
         print("SMOKE TEST MODE ENABLED: Limiting to 2 epochs, batch size 4")
-        
-    if args.finetune_uncertainty and not args.smoke_test:
-        config['num_epochs'] = config.get('warmup_epochs', 5) + config.get('hetero_epochs', 15)
 
     set_seed(config['seed'])
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -145,18 +136,12 @@ def main():
     ).to(device)
 
     # Optimizer & Loss
-    if args.finetune_uncertainty:
-        current_lr = config.get('warmup_lr', 0.0001)
-    else:
-        current_lr = config['learning_rate']
-        
-    optimizer = optim.Adam(model.parameters(), lr=current_lr)
+    optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
     criterion = RestorationLoss(
         lpips_model=lpips_model,
-        lambda_l1=config.get('lambda_l1', 1.0),
-        lambda_ssim=config.get('lambda_ssim', 0.5),
-        lambda_lpips=config.get('lambda_lpips', 0.5),
-        lambda_hetero=config.get('lambda_hetero', 0.0),
+        lambda_l1=config['lambda_l1'],
+        lambda_ssim=config['lambda_ssim'],
+        lambda_lpips=config['lambda_lpips'],
         device=device
     )
     
@@ -168,14 +153,9 @@ def main():
             print(f"Loading checkpoint '{args.resume}'...")
             checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
             start_epoch = checkpoint['epoch'] + 1
-            if args.finetune_uncertainty:
-                model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-                start_epoch = 0 # Restart epoch count for fine-tuning
-                best_psnr = 0.0
-            else:
-                model.load_state_dict(checkpoint['model_state_dict'])
-                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                best_psnr = checkpoint.get('val_psnr', 0.0)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            best_psnr = checkpoint.get('val_psnr', 0.0)
             print(f"Resuming training from epoch {start_epoch} with previous best PSNR: {best_psnr:.4f}")
         else:
             print(f"Error: No checkpoint found at '{args.resume}'")
@@ -193,11 +173,8 @@ def main():
     
     with open(metrics_log_file, mode, newline='') as f:
         writer = csv.writer(f)
-        if not args.resume or (args.finetune_uncertainty and start_epoch == 0):
-            if args.finetune_uncertainty:
-                writer.writerow(['epoch', 'train_loss', 'val_psnr', 'val_ssim', 'val_lpips', 'val_sigma', 'seconds'])
-            else:
-                writer.writerow(['epoch', 'train_loss', 'val_psnr', 'val_ssim', 'val_lpips', 'seconds'])
+        if not args.resume:
+            writer.writerow(['epoch', 'train_loss', 'val_psnr', 'val_ssim', 'val_lpips', 'seconds'])
         
     with open(audit_log_file, mode, newline='') as f:
         writer = csv.writer(f)
@@ -208,29 +185,9 @@ def main():
     scaler = GradScaler()
 
     # Training Loop
-    if args.finetune_uncertainty:
-        model.predict_uncertainty = True
-
     for epoch in range(start_epoch, config['num_epochs']):
         epoch_start_time = time.time()
         
-        is_warmup = False
-        # Freezing logic
-        if args.finetune_uncertainty:
-            warmup_epochs = config.get('warmup_epochs', 5)
-            is_warmup = epoch < warmup_epochs
-            
-            if epoch == warmup_epochs:
-                print(f"Switching to Phase B: Heteroscedastic Fine-tuning with LR={config['learning_rate']}")
-                for g in optimizer.param_groups:
-                    g['lr'] = config['learning_rate']
-                    
-            for name, param in model.named_parameters():
-                if 'conv_uncertainty' not in name:
-                    param.requires_grad = False
-                else:
-                    param.requires_grad = True
-
         model.train()
         train_loss = 0.0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config['num_epochs']} [Train]")
@@ -243,18 +200,8 @@ def main():
             
             amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
             with autocast(dtype=amp_dtype):
-                if args.finetune_uncertainty:
-                    pred, sigma = model(noisy)
-                    if is_warmup:
-                        with torch.no_grad():
-                            err_map = torch.abs(pred - gt)
-                        loss = F.mse_loss(sigma, err_map)
-                        l1 = 0.0; ssim = 0.0; lpips_val = 0.0
-                    else:
-                        loss, l1, ssim, lpips_val = criterion(pred, gt, sigma=sigma)
-                else:
-                    pred = model(noisy)
-                    loss, l1, ssim, lpips_val = criterion(pred, gt)
+                pred = model(noisy)
+                loss, l1, ssim, lpips_val = criterion(pred, gt)
             
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -273,25 +220,14 @@ def main():
         
         # Validation
         model.eval()
-        val_psnr, val_ssim, val_lpips, val_sigma = 0.0, 0.0, 0.0, 0.0
-        all_sigmas = []
-        all_errors = []
+        val_psnr, val_ssim, val_lpips = 0.0, 0.0, 0.0
         with torch.no_grad():
             pbar_val = tqdm(val_loader, desc=f"Epoch {epoch+1}/{config['num_epochs']} [Val]")
             for noisy, gt, filenames, is_synthetic in pbar_val:
                 noisy = noisy.to(device, non_blocking=True)
                 gt = gt.to(device, non_blocking=True)
                 
-                if args.finetune_uncertainty:
-                    pred, sigma = model(noisy)
-                    val_sigma += sigma.mean().item()
-                    if is_warmup:
-                        err_map = torch.abs(pred - gt)
-                        all_sigmas.append(sigma.cpu().numpy().flatten())
-                        all_errors.append(err_map.cpu().numpy().flatten())
-                else:
-                    pred = model(noisy)
-                    
+                pred = model(noisy)
                 psnr, ssim, lpips_val = evaluator.evaluate(pred, gt)
                 
                 val_psnr += psnr
@@ -301,25 +237,13 @@ def main():
         val_psnr /= len(val_loader)
         val_ssim /= len(val_loader)
         val_lpips /= len(val_loader)
-        if args.finetune_uncertainty:
-            val_sigma /= len(val_loader)
-            if is_warmup and len(all_sigmas) > 0:
-                import numpy as np
-                from scipy.stats import pearsonr
-                sf = np.concatenate(all_sigmas)
-                ef = np.concatenate(all_errors)
-                corr, _ = pearsonr(sf, ef)
-                print(f"Epoch {epoch+1} Warmup Correlation (Sigma vs L1 Error): {corr:.4f}")
         
         epoch_duration = time.time() - epoch_start_time
         
         # Log metrics to metrics log
         with open(metrics_log_file, 'a', newline='') as f:
             writer = csv.writer(f)
-            if args.finetune_uncertainty:
-                writer.writerow([epoch+1, avg_train_loss, val_psnr, val_ssim, val_lpips, val_sigma, epoch_duration])
-            else:
-                writer.writerow([epoch+1, avg_train_loss, val_psnr, val_ssim, val_lpips, epoch_duration])
+            writer.writerow([epoch+1, avg_train_loss, val_psnr, val_ssim, val_lpips, epoch_duration])
         
         print(f"Epoch {epoch+1} - Train Loss: {avg_train_loss:.4f} | Val PSNR: {val_psnr:.2f} | Val SSIM: {val_ssim:.4f} | Val LPIPS: {val_lpips:.4f} | Time: {epoch_duration:.1f}s")
         

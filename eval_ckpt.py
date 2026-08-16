@@ -15,25 +15,28 @@ def set_seed(seed):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ckpt", type=str, required=True)
+    parser.add_argument("--checkpoints", type=str, nargs="+", required=True)
     args = parser.parse_args()
 
     device = 'cuda'
-    ckpt = torch.load(args.ckpt, map_location=device, weights_only=False)
-    config = ckpt.get('config', {
-        'in_channels': 1, 'out_channels': 1, 'num_features': 64, 'num_res_blocks': 16,
-        'train_gt_dir': 'dataset/train/train/GT', 'train_noisy_dir': 'dataset/train/train/NoisyLR',
-        'gt_crop_size': 128, 'val_split_ratio': 0.1, 'seed': 1234
-    })
     
-    config['train_gt_dir'] = 'dataset/train/train/GT'
-    config['train_noisy_dir'] = 'dataset/train/train/NoisyLR'
-    
+    models = []
+    for ckpt_path in args.checkpoints:
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        config = ckpt.get('config', {
+            'in_channels': 1, 'out_channels': 1, 'num_features': 64, 'num_res_blocks': 16,
+            'train_gt_dir': 'dataset/train/train/GT', 'train_noisy_dir': 'dataset/train/train/NoisyLR',
+            'gt_crop_size': 128, 'val_split_ratio': 0.1, 'seed': 1234
+        })
+        config['train_gt_dir'] = 'dataset/train/train/GT'
+        config['train_noisy_dir'] = 'dataset/train/train/NoisyLR'
+        
+        model = RestorationCNN(config['in_channels'], config['out_channels'], config['num_features'], config['num_res_blocks'], 2).to(device)
+        model.load_state_dict(ckpt['model_state_dict'], strict=False)
+        model.eval()
+        models.append(model)
+        
     set_seed(config['seed'])
-
-    model = RestorationCNN(config['in_channels'], config['out_channels'], config['num_features'], config['num_res_blocks'], 2).to(device)
-    model.load_state_dict(ckpt['model_state_dict'], strict=False)
-    model.eval()
 
     lpips_net = lpips.LPIPS(net='vgg').to(device)
     evaluator = MetricsEvaluator(lpips_net, device)
@@ -51,14 +54,20 @@ def main():
     with torch.no_grad():
         for x, y, _, _ in loader:
             x, y = x.to(device), y.to(device)
-            p = model(x)
-            if isinstance(p, tuple): p = p[0] # handle uncertainty head output if present
+            
+            ensemble_p = []
+            for m in models:
+                p = m(x)
+                if isinstance(p, tuple): p = p[0]
+                ensemble_p.append(p)
+            
+            p = torch.mean(torch.stack(ensemble_p), dim=0)
             ps, ss, lp = evaluator.evaluate(p, y)
             psnr_t += ps
             ssim_t += ss
             lpips_t += lp
 
-    print(f"Metrics for {args.ckpt}:")
+    print(f"Metrics for Ensemble {args.checkpoints}:")
     print(f"PSNR: {psnr_t/len(loader):.4f} | SSIM: {ssim_t/len(loader):.4f} | LPIPS: {lpips_t/len(loader):.4f}")
 
 if __name__ == '__main__':

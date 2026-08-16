@@ -27,7 +27,7 @@ def main():
     parser = argparse.ArgumentParser(description="Inference for Image Restoration")
     parser.add_argument("--input_dir", type=str, required=True, help="Directory containing input .npy files")
     parser.add_argument("--output_dir", type=str, required=True, help="Directory to save output .npy files")
-    parser.add_argument("--checkpoints", type=str, nargs="+", default=[os.path.join("weights", "best_model.pth")], help="Paths to model checkpoints for ensembling")
+    parser.add_argument("--checkpoints", type=str, nargs="+", default=[os.path.join("weights", "best_model_seed2.pth")], help="Paths to model checkpoints for ensembling")
     parser.add_argument("--fast", action="store_true", help="Skip TTA for faster inference")
     parser.add_argument("--with_uncertainty", action="store_true", help="Output uncertainty maps alongside restored images")
     args = parser.parse_args()

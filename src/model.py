@@ -16,9 +16,10 @@ class ResidualBlock(nn.Module):
         return out + identity
 
 class RestorationCNN(nn.Module):
-    def __init__(self, in_channels=1, out_channels=1, num_features=64, num_res_blocks=16, scale=2):
+    def __init__(self, in_channels=1, out_channels=1, num_features=64, num_res_blocks=16, scale=2, enable_uncertainty_head=False):
         super(RestorationCNN, self).__init__()
         self.scale = scale
+        self.enable_uncertainty_head = enable_uncertainty_head
         
         # Initial feature extraction
         self.conv_in = nn.Conv2d(in_channels, num_features, kernel_size=3, padding=1)
@@ -36,14 +37,14 @@ class RestorationCNN(nn.Module):
         # Final conv (optional, but good for refinement after PixelShuffle)
         self.conv_out = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
 
-        # Uncertainty branch
-        self.predict_uncertainty = False
-        self.conv_uncertainty = nn.Sequential(
-            nn.Conv2d(out_channels, 16, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(16, 1, kernel_size=3, padding=1),
-            nn.Softplus()
-        )
+        # Optional Uncertainty Head (branching off after refinement, before final activation)
+        if self.enable_uncertainty_head:
+            self.conv_uncertainty = nn.Sequential(
+                nn.Conv2d(out_channels, num_features, kernel_size=3, padding=1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Conv2d(num_features, out_channels, kernel_size=3, padding=1),
+                nn.Softplus() # Ensure sigma is strictly positive
+            )
 
     def forward(self, x):
         # Feature extraction
@@ -62,15 +63,15 @@ class RestorationCNN(nn.Module):
         out = self.conv_out(out)
         
         # Uncertainty branch
-        if getattr(self, 'predict_uncertainty', False):
-            sigma = self.conv_uncertainty(out) + 1e-6
+        if self.enable_uncertainty_head:
+            sigma = self.conv_uncertainty(out)
         
         # Ensure output is in [0, 1] range (especially for inference/metrics)
         # Since it's continuous space, clamping might hurt gradients if it dies,
         # but torch.clamp handles gradients fine for the pass-through regions.
         out = torch.clamp(out, 0.0, 1.0)
         
-        if getattr(self, 'predict_uncertainty', False):
+        if self.enable_uncertainty_head:
             return out, sigma
             
         return out

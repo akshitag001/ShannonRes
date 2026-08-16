@@ -36,8 +36,8 @@ It is recommended to run this project in a clean Python 3.10+ environment with a
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/semicon.git
-cd semicon
+git clone https://github.com/akshitag001/ShannonRes.git
+cd ShannonRes
 
 # Create and activate a virtual environment (Windows)
 python -m venv venv
@@ -61,7 +61,7 @@ You must download the KLA Semiconductor dataset and place it in the root directo
 
 Your folder structure must look exactly like this:
 ```text
-semicon/
+ShannonRes/
 ├── dataset/
 │   ├── train/
 │   │   └── train/
@@ -102,18 +102,12 @@ To verify the speed of the model on your hardware and generate a visual comparis
 python benchmark.py
 ```
 
-### 4. Uncertainty Estimation (Heteroscedastic Aleatoric Uncertainty)
-Our model features a parallel uncertainty head that can predict a per-pixel confidence map alongside the restored image. This is particularly useful for identifying regions where the model is unsure (e.g. heavy speckle noise patterns).
 
-**Fine-tuning the Uncertainty Head:**
-You can fine-tune the existing checkpoint to learn uncertainty without degrading the base restoration:
-```bash
-python train.py --finetune_uncertainty --resume weights/best_model_seed2.pth --config configs/uncertainty_finetune.yaml
-```
 
-**Inference with Uncertainty:**
-To generate both restored `.npy` files and normalized uncertainty heatmaps (saved in `output_dir/uncertainty_maps/`), use the `--with_uncertainty` flag:
-```bash
-python inference.py --input_dir dataset/Test_NoisyLR/NoisyLR --output_dir output_restored_unc --checkpoints weights/best_model_uncertainty.pth --with_uncertainty
-```
-*Note: Omitting the `--with_uncertainty` flag guarantees strict adherence to the default restoration output contract.*
+## Experimental: Uncertainty-Aware Restoration (Not Used in Final Submission)
+
+We attempted to add a parallel **heteroscedastic aleatoric uncertainty head** to estimate per-pixel restoration difficulty. 
+- **Method**: The model predicted a sigma map alongside the restored image, trained with a heteroscedastic loss function.
+- **Verification**: We computed the Pearson correlation between the predicted sigma map, the actual L1 error, and the ground-truth brightness.
+- **Findings**: The uncertainty head consistently converged to a brightness-shortcut solution (Pearson correlation with GT brightness: **-0.89**, correlation with actual L1 error: **-0.11**). It learned that "dark background = high uncertainty" rather than genuine structural difficulty.
+- **Decision**: To protect core restoration quality and avoid presenting misleading confidence signals, this experiment was **cleanly isolated** and excluded from the final submission (weights/best_model_seed2.pth is entirely unaffected). The code is preserved in experimental/uncertainty/ for future work.
