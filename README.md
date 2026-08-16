@@ -101,3 +101,19 @@ To verify the speed of the model on your hardware and generate a visual comparis
 ```bash
 python benchmark.py
 ```
+
+### 4. Uncertainty Estimation (Heteroscedastic Aleatoric Uncertainty)
+Our model features a parallel uncertainty head that can predict a per-pixel confidence map alongside the restored image. This is particularly useful for identifying regions where the model is unsure (e.g. heavy speckle noise patterns).
+
+**Fine-tuning the Uncertainty Head:**
+You can fine-tune the existing checkpoint to learn uncertainty without degrading the base restoration:
+```bash
+python train.py --finetune_uncertainty --resume weights/best_model_seed2.pth --config configs/uncertainty_finetune.yaml
+```
+
+**Inference with Uncertainty:**
+To generate both restored `.npy` files and normalized uncertainty heatmaps (saved in `output_dir/uncertainty_maps/`), use the `--with_uncertainty` flag:
+```bash
+python inference.py --input_dir dataset/Test_NoisyLR/NoisyLR --output_dir output_restored_unc --checkpoints weights/best_model_uncertainty.pth --with_uncertainty
+```
+*Note: Omitting the `--with_uncertainty` flag guarantees strict adherence to the default restoration output contract.*

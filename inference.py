@@ -3,6 +3,7 @@ import argparse
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
+import matplotlib.pyplot as plt
 from src.model import RestorationCNN
 
 class InferenceDataset(Dataset):
@@ -28,6 +29,7 @@ def main():
     parser.add_argument("--output_dir", type=str, required=True, help="Directory to save output .npy files")
     parser.add_argument("--checkpoints", type=str, nargs="+", default=[os.path.join("weights", "best_model.pth")], help="Paths to model checkpoints for ensembling")
     parser.add_argument("--fast", action="store_true", help="Skip TTA for faster inference")
+    parser.add_argument("--with_uncertainty", action="store_true", help="Output uncertainty maps alongside restored images")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -54,7 +56,9 @@ def main():
             scale=scale
         ).to(device)
         
-        model.load_state_dict(checkpoint['model_state_dict'])
+        model.load_state_dict(checkpoint['model_state_dict'], strict=not args.with_uncertainty)
+        if args.with_uncertainty:
+            model.predict_uncertainty = True
         model.eval()
         
         try:
@@ -76,17 +80,28 @@ def main():
 
     def inference_with_tta(x, model):
         outputs = []
+        sigmas = []
         for k in range(4):
             # Rotate
             rot_x = torch.rot90(x, k, dims=[2, 3])
-            out_rot = model(rot_x)
+            if args.with_uncertainty:
+                out_rot, sigma_rot = model(rot_x)
+                sigmas.append(torch.rot90(sigma_rot, -k, dims=[2, 3]))
+            else:
+                out_rot = model(rot_x)
             outputs.append(torch.rot90(out_rot, -k, dims=[2, 3]))
             
             # Rotate + Flip
             flip_x = torch.flip(rot_x, [3])
-            out_flip = model(flip_x)
+            if args.with_uncertainty:
+                out_flip, sigma_flip = model(flip_x)
+                sigmas.append(torch.rot90(torch.flip(sigma_flip, [3]), -k, dims=[2, 3]))
+            else:
+                out_flip = model(flip_x)
             outputs.append(torch.rot90(torch.flip(out_flip, [3]), -k, dims=[2, 3]))
             
+        if args.with_uncertainty:
+            return torch.mean(torch.stack(outputs), dim=0), torch.mean(torch.stack(sigmas), dim=0)
         return torch.mean(torch.stack(outputs), dim=0)
 
     with torch.no_grad():
@@ -95,16 +110,31 @@ def main():
             
             # Inference with optional 8x TTA across all ensembled models
             ensemble_outputs = []
+            ensemble_sigmas = []
             for m in models:
                 if args.fast:
-                    ensemble_outputs.append(m(batch_tensors))
+                    if args.with_uncertainty:
+                        out_t, sig_t = m(batch_tensors)
+                        ensemble_outputs.append(out_t)
+                        ensemble_sigmas.append(sig_t)
+                    else:
+                        ensemble_outputs.append(m(batch_tensors))
                 else:
-                    ensemble_outputs.append(inference_with_tta(batch_tensors, m))
+                    if args.with_uncertainty:
+                        out_t, sig_t = inference_with_tta(batch_tensors, m)
+                        ensemble_outputs.append(out_t)
+                        ensemble_sigmas.append(sig_t)
+                    else:
+                        ensemble_outputs.append(inference_with_tta(batch_tensors, m))
                 
             outputs = torch.mean(torch.stack(ensemble_outputs), dim=0)
-            
-            # Post-process and save
             outputs = outputs.cpu().numpy()
+            
+            if args.with_uncertainty:
+                sigmas = torch.mean(torch.stack(ensemble_sigmas), dim=0)
+                sigmas = sigmas.cpu().numpy()
+                unc_dir = os.path.join(args.output_dir, "uncertainty_maps")
+                os.makedirs(unc_dir, exist_ok=True)
             
             for i in range(len(filenames)):
                 filename = filenames[i]
@@ -113,6 +143,15 @@ def main():
                 
                 save_path = os.path.join(args.output_dir, filename)
                 np.save(save_path, out_arr)
+                
+                if args.with_uncertainty:
+                    sigma_arr = sigmas[i].squeeze(0)
+                    np.save(os.path.join(unc_dir, filename), sigma_arr)
+                    
+                    # Normalize and save as heatmap PNG
+                    sigma_norm = (sigma_arr - sigma_arr.min()) / (sigma_arr.max() - sigma_arr.min() + 1e-8)
+                    png_filename = filename.replace('.npy', '.png')
+                    plt.imsave(os.path.join(unc_dir, png_filename), sigma_norm, cmap='inferno')
                 
     print(f"Successfully processed {len(dataset)} images and saved to {args.output_dir}")
 

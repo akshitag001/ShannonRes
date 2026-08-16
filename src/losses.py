@@ -3,12 +3,18 @@ import torch.nn as nn
 import lpips
 from torchmetrics.image import StructuralSimilarityIndexMeasure
 
+def heteroscedastic_loss(pred, gt, sigma):
+    # L1-based heteroscedastic loss
+    # sigma is expected to be strictly positive (e.g. from Softplus + epsilon)
+    return torch.mean(torch.abs(pred - gt) / sigma + torch.log(sigma))
+
 class RestorationLoss(nn.Module):
-    def __init__(self, lpips_model, lambda_l1=1.0, lambda_ssim=0.5, lambda_lpips=0.5, device='cuda'):
+    def __init__(self, lpips_model, lambda_l1=1.0, lambda_ssim=0.5, lambda_lpips=0.5, lambda_hetero=0.0, device='cuda'):
         super(RestorationLoss, self).__init__()
         self.lambda_l1 = lambda_l1
         self.lambda_ssim = lambda_ssim
         self.lambda_lpips = lambda_lpips
+        self.lambda_hetero = lambda_hetero
         
         self.l1_loss = nn.L1Loss()
         # SSIM from torchmetrics
@@ -17,9 +23,16 @@ class RestorationLoss(nn.Module):
         self.lpips_loss = lpips_model
         self.device = device
 
-    def forward(self, pred, gt):
-        # 1. L1 Loss
-        loss_l1 = self.l1_loss(pred, gt)
+    def forward(self, pred, gt, sigma=None):
+        # 1. L1 Loss (or Heteroscedastic Loss if sigma is provided)
+        if sigma is not None and self.lambda_hetero > 0.0:
+            loss_pixel = heteroscedastic_loss(pred, gt, sigma)
+            pixel_weight = self.lambda_hetero
+            l1_val = loss_pixel.item() # for logging purposes
+        else:
+            loss_pixel = self.l1_loss(pred, gt)
+            pixel_weight = self.lambda_l1
+            l1_val = loss_pixel.item()
         
         # 2. SSIM Loss (1 - SSIM)
         # ssim outputs a tensor scalar
@@ -38,8 +51,8 @@ class RestorationLoss(nn.Module):
         loss_lpips = self.lpips_loss(pred_lpips_in, gt_lpips_in).mean()
         
         # Total Loss
-        total_loss = (self.lambda_l1 * loss_l1 + 
+        total_loss = (pixel_weight * loss_pixel + 
                       self.lambda_ssim * loss_ssim + 
                       self.lambda_lpips * loss_lpips)
                       
-        return total_loss, loss_l1.item(), ssim_val.item(), loss_lpips.item()
+        return total_loss, l1_val, ssim_val.item(), loss_lpips.item()

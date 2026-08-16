@@ -36,6 +36,15 @@ class RestorationCNN(nn.Module):
         # Final conv (optional, but good for refinement after PixelShuffle)
         self.conv_out = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
 
+        # Uncertainty branch
+        self.predict_uncertainty = False
+        self.conv_uncertainty = nn.Sequential(
+            nn.Conv2d(out_channels, 16, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(16, 1, kernel_size=3, padding=1),
+            nn.Softplus()
+        )
+
     def forward(self, x):
         # Feature extraction
         out_in = self.conv_in(x)
@@ -52,9 +61,16 @@ class RestorationCNN(nn.Module):
         # Final mapping
         out = self.conv_out(out)
         
+        # Uncertainty branch
+        if getattr(self, 'predict_uncertainty', False):
+            sigma = self.conv_uncertainty(out) + 1e-6
+        
         # Ensure output is in [0, 1] range (especially for inference/metrics)
         # Since it's continuous space, clamping might hurt gradients if it dies,
         # but torch.clamp handles gradients fine for the pass-through regions.
         out = torch.clamp(out, 0.0, 1.0)
         
+        if getattr(self, 'predict_uncertainty', False):
+            return out, sigma
+            
         return out
