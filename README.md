@@ -87,14 +87,19 @@ python train.py --config configs/default.yaml
 ```
 *Note: Checkpoints are automatically saved to `weights/best_model.pth`. Metrics (PSNR, SSIM, LPIPS) are evaluated on a strict, pure 10% validation split.*
 
-### 2. Running Inference
-The inference script expects a directory of `.npy` arrays and outputs restored arrays of the exact same filename and format.
+### 2. Running Inference (Evaluation script)
+For final evaluation, the required `run.py` entry script should be used. It takes two positional arguments and follows all submission guidelines (clips to [0,1], removes NaNs/Infs, and outputs `.npy` files).
+```bash
+python run.py dataset/Test_NoisyLR/NoisyLR output_restored
+```
+
+Alternatively, for more advanced configurations (like 8x TTA or ensembling), use our internal `inference.py` script:
 ```bash
 python inference.py --input_dir dataset/Test_NoisyLR/NoisyLR --output_dir output_restored
 ```
 
 > [!TIP]  
-> **Need maximum speed?** You can pass the `--fast` flag to the inference script to bypass the 8-pass Test-Time Augmentation (TTA), prioritizing raw >400 FPS throughput over marginal PSNR gains!
+> **Need maximum speed?** You can pass the `--fast` flag to the `inference.py` script to bypass the 8-pass Test-Time Augmentation (TTA), prioritizing raw >400 FPS throughput over marginal PSNR gains! (Note: `run.py` is already optimized for fast execution without TTA to meet general evaluation constraints).
 
 ### 3. Benchmarking & Visuals
 To verify the speed of the model on your hardware and generate a visual comparison grid (`visual_results.png`):
